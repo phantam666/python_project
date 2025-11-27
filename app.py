@@ -1,114 +1,127 @@
-import cv2
-import mediapipe as mp
-import os
-import keyboard
-import time
+from flask import Flask, jsonify, request, render_template, url_for, redirect, session, flash
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField
+from wtforms.validators import DataRequired, Email, ValidationError
+import bcrypt
+from flask_mysqldb import MySQL  
 
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
+app = Flask(__name__)
+mysql = MySQL(app)
+app.config['SECRET_KEY'] = 'your_secret_key'
+app.config['MYSQL_HOST'] = 'localhost'  
+app.config['MYSQL_USER'] = 'root'
+app.config['MYSQL_PASSWORD'] = 'Xplx@2104'
+app.config['MYSQL_DB'] = 'flasksql'
 
-hands = mp_hands.Hands(max_num_hands=1)
-cap = cv2.VideoCapture(0)
 
-def finger_is_up(lm, tip_id, pip_id):
-    return lm[tip_id].y < lm[pip_id].y
+class RegistrationForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired()])
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Register')
+    
+    def validate_email(self, field):
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (field.data,))
+        user = cursor.fetchone()
+        cursor.close()
+        if user:
+            raise ValidationError('Email already in use. Please choose a different one.')
 
-# Flags to avoid repeating app launches
-thumbs_up_triggered = False
-peace_triggered = False
-fist_triggered = False
-open_palm_triggered = False
+class loginForm(FlaskForm):
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Login')
+    
 
-gesture_control_enabled = True
-last_toggle_time = 0  # For debounce
+@app.route('/')
+def Home():
+    return render_template('index.html')
+@app.route('/index')
+def index():
+    return render_template('index.html')
 
-while cap.isOpened():
-    success, image = cap.read()
-    if not success:
-        break
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        name = form.username.data
+        email = form.email.data
+        password = form.password.data
 
-    # === Toggle control on F8 key press ===
-    if keyboard.is_pressed('ctrl + f1'):
-        current_time = time.time()
-        if current_time - last_toggle_time > 1:  # debounce 1 second
-            gesture_control_enabled = not gesture_control_enabled
-            state = "ENABLED ✅" if gesture_control_enabled else "DISABLED ❌"
-            print(f"[TOGGLE] Gesture control {state}")
-            last_toggle_time = current_time
+        # Check if email already exists
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        existing_user = cursor.fetchone()
+        
+        if existing_user:
+            # Email already in use
+            return render_template('register.html', form=form, message="Email already exists.")
+        
+        # Hash the password before storing
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        
+        # Store user in the database
+        cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s)", 
+                       (name, email, hashed_password))
+        mysql.connection.commit()
+        cursor.close()
+        
+        return redirect(url_for('login'))
+    return render_template('register.html', form=form)
 
-    image = cv2.flip(image, 1)
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    result = hands.process(image_rgb)
 
-    if gesture_control_enabled and result.multi_hand_landmarks:
-        for hand_landmarks in result.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            lm = hand_landmarks.landmark
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    form = loginForm()
+    if form.validate_on_submit():
+        email = form.email.data
+        password = form.password.data
 
-            thumb_up = lm[4].y < lm[3].y
-            index_up = finger_is_up(lm, 8, 6)
-            middle_up = finger_is_up(lm, 12, 10)
-            ring_up = finger_is_up(lm, 16, 14)
-            pinky_up = finger_is_up(lm, 20, 18)
+        # Check if email already exists
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        existing_user = cursor.fetchone()
+        cursor.close()
+        
+        if existing_user and bcrypt.checkpw(password.encode('utf-8'), existing_user[3].encode('utf-8')):
+            session['user_id'] = existing_user[0]
+            return redirect(url_for('dash'))
+        else:
+            flash("Invalid email or password.","danger")
+            return redirect(url_for('login'))
 
-            fingers = [thumb_up, index_up, middle_up, ring_up, pinky_up]
-            total_fingers_up = sum(fingers)
+        
+    return render_template('login.html', form=form)
 
-            gesture = None
-            action = None
 
-            if thumb_up and not any([index_up, middle_up, ring_up, pinky_up]):
-                gesture = "Thumbs Up 👍"
-                action = "Opening Notepad"
-                if not thumbs_up_triggered:
-                    print("👍 Opening Notepad...")
-                    os.system("start notepad")
-                    thumbs_up_triggered = True
+@app.route('/dashboard')
+def dash():
+    if 'user_id' in session:
+        user_id = session['user_id']
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()  # Fetch the first (and only) user from the query
+        cursor.close()
 
-            elif index_up and middle_up and not (ring_up or pinky_up or thumb_up):
-                gesture = "Peace ✌️"
-                action = "Opening YouTube"
-                if not peace_triggered:
-                    print("✌️ Opening YouTube...")
-                    os.system("start chrome https://www.youtube.com")
-                    peace_triggered = True
+        if user:
+            # Instead of using index-based access, use field names
+            return render_template('dashboard.html', user=user)
 
-            elif total_fingers_up == 0:
-                gesture = "Fist ✊"
-                action = "Opening Paint"
-                if not fist_triggered:
-                    print("✊ Opening Paint...")
-                    os.system("start mspaint")
-                    fist_triggered = True
+    flash('You must be logged in to view the dashboard.', 'warning')
+    return redirect(url_for('login'))
 
-            elif total_fingers_up == 5:
-                gesture = "Open Palm 🖐️"
-                action = "Opening Chrome"
-                if not open_palm_triggered:
-                    print("🖐️ Opening Chrome...")
-                    os.system("start chrome")
-                    open_palm_triggered = True
 
-            else:
-                # Reset flags if no recognized gesture
-                thumbs_up_triggered = False
-                peace_triggered = False
-                fist_triggered = False
-                open_palm_triggered = False
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)  
+    flash("You have been logged out.")  
+    return redirect(url_for('index'))
 
-            if gesture:
-                cv2.putText(image, gesture, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.putText(image, action, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+@app.route('/about')
+def about():
+    return render_template('about.html')
 
-    elif not gesture_control_enabled:
-        cv2.putText(image, "Gesture Control DISABLED ❌ (Press F8)", (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+if __name__ == '__main__':
+    app.run(debug=True)
 
-    cv2.imshow("Hand Gesture Control", image)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("Exit")
-        break
-
-cap.release()
-cv2.destroyAllWindows()
